@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +116,24 @@ func TestIsAuthError(t *testing.T) {
 		{"text 401 + invalid_grant", errors.New("oauth2: 401 invalid_grant: Token has been expired"), true},
 		{"text Token has been expired or revoked", errors.New("401: Token has been expired or revoked"), true},
 		{"text 401 alone", errors.New("HTTP 401 response"), false},
+		// An expired/revoked refresh token fails token *refresh* (HTTP 400
+		// invalid_grant from the token endpoint), so it carries no 401 —
+		// this is the shape a Testing-mode OAuth app produces every 7 days.
+		{"RetrieveError invalid_grant", &oauth2.RetrieveError{
+			Response:         &http.Response{StatusCode: http.StatusBadRequest},
+			ErrorCode:        "invalid_grant",
+			ErrorDescription: "Token has been expired or revoked.",
+		}, true},
+		{"RetrieveError invalid_grant wrapped like production", fmt.Errorf("getting profile: %w",
+			&url.Error{Op: "Get", URL: "https://gmail.googleapis.com/gmail/v1/users/me/profile", Err: &oauth2.RetrieveError{
+				Response:  &http.Response{StatusCode: http.StatusBadRequest},
+				ErrorCode: "invalid_grant",
+			}}), true},
+		{"RetrieveError other code", &oauth2.RetrieveError{
+			Response:  &http.Response{StatusCode: http.StatusServiceUnavailable},
+			ErrorCode: "temporarily_unavailable",
+		}, false},
+		{"text invalid_grant without 401", errors.New(`oauth2: "invalid_grant" "Token has been expired or revoked."`), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -597,6 +617,100 @@ func TestRunWithExpiredTokenPromptsReauth(t *testing.T) {
 	}
 	if !contains(stub.calls, "reauth") {
 		t.Errorf("expected reauth prompt")
+	}
+}
+
+// TestRunWithExpiredRefreshTokenPromptsReauth is the regression test for the
+// invalid_grant hard-fail: verification of a stored token whose *refresh*
+// fails (oauth2.RetrieveError wrapped by the HTTP client, no 401 anywhere)
+// must route into the re-auth flow, not abort init.
+func TestRunWithExpiredRefreshTokenPromptsReauth(t *testing.T) {
+	t.Parallel()
+	fs := newFakeFS()
+	d := baseDeps(t, fs)
+	d.HasStoredToken = func() bool { return true }
+	calls := 0
+	d.GmailVerify = func(_ context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", fmt.Errorf("getting profile: %w", &url.Error{
+				Op:  "Get",
+				URL: "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+				Err: &oauth2.RetrieveError{
+					Response:         &http.Response{StatusCode: http.StatusBadRequest},
+					ErrorCode:        "invalid_grant",
+					ErrorDescription: "Token has been expired or revoked.",
+				},
+			})
+		}
+		return "ada@example.com", nil
+	}
+	deleteCalled := false
+	d.DeleteToken = func() error { deleteCalled = true; return nil }
+
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "downloaded.json")
+	if err := os.WriteFile(src, []byte(validOAuthJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &stubPrompter{credChoice: "paste", pasteJSON: validOAuthJSON, redirectURL: "http://localhost/?code=ABC", reauth: true}
+	d.Prompter = stub
+
+	if err := runWith(context.Background(), d, &initOptions{credentialsFile: src}); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	if !deleteCalled {
+		t.Errorf("expected DeleteToken to be called after re-auth confirm")
+	}
+	if !contains(stub.calls, "reauth") {
+		t.Errorf("expected reauth prompt")
+	}
+}
+
+// TestRunWith_AuthCodeStdinExpiredTokenSkipsReauthPrompt: the two-phase
+// install has no TTY and its stdin carries the auth code, so an expired
+// stored token must fall through to the fresh OAuth flow without the
+// interactive re-auth confirmation.
+func TestRunWith_AuthCodeStdinExpiredTokenSkipsReauthPrompt(t *testing.T) {
+	t.Parallel()
+	fs := newFakeFS()
+	d := baseDeps(t, fs)
+	d.HasStoredToken = func() bool { return true }
+	calls := 0
+	d.GmailVerify = func(_ context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", fmt.Errorf("getting profile: %w", &oauth2.RetrieveError{
+				Response:  &http.Response{StatusCode: http.StatusBadRequest},
+				ErrorCode: "invalid_grant",
+			})
+		}
+		return "ada@example.com", nil
+	}
+	deleteCalled := false
+	d.DeleteToken = func() error { deleteCalled = true; return nil }
+	d.StdinReadAll = func() (string, error) { return "http://localhost/?code=STDIN-CODE\n", nil }
+
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "downloaded.json")
+	if err := os.WriteFile(src, []byte(validOAuthJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub := &stubPrompter{credChoice: "paste", pasteJSON: validOAuthJSON}
+	d.Prompter = stub
+
+	err := runWith(context.Background(), d,
+		&initOptions{credentialsFile: src, authCodeStdin: true, noBrowser: true})
+	if err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	if !deleteCalled {
+		t.Errorf("expected DeleteToken to be called")
+	}
+	if contains(stub.calls, "reauth") || contains(stub.calls, "redirect") || contains(stub.calls, "browser") {
+		t.Fatalf("--auth-code-stdin must not prompt, calls=%v", stub.calls)
 	}
 }
 

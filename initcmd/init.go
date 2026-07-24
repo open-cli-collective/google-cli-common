@@ -509,7 +509,7 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 		if msg := auth.CheckScopesMigration(cfg.GrantedScopes); msg != "" {
 			d.View.Error("Recorded scopes are stale.")
 			d.View.Println(msg)
-			if err := promptAndDeleteForReauth(d); err != nil {
+			if err := promptAndDeleteForReauth(d, opts); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -527,7 +527,7 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 	if err != nil {
 		if isAuthError(err) {
 			d.View.Error("Stored token is expired or revoked.")
-			if err := promptAndDeleteForReauth(d); err != nil {
+			if err := promptAndDeleteForReauth(d, opts); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -547,7 +547,7 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 	if err != nil {
 		if people.IsInsufficientScopeError(err) {
 			d.View.Error("Token is missing People API scope.")
-			if err := promptAndDeleteForReauth(d); err != nil {
+			if err := promptAndDeleteForReauth(d, opts); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -561,14 +561,23 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 // promptAndDeleteForReauth asks the user whether to re-auth and clears the
 // stored token if they confirm. Returns nil (caller should fall through to
 // the OAuth flow) on confirm; returns an error on decline.
-func promptAndDeleteForReauth(d initDeps) error {
-	confirm, err := d.Prompter.ConfirmReauth()
-	if err != nil {
-		return err
-	}
-	if !confirm {
-		d.View.Info("Run '%s config clear' to remove the stored token.", config.ProductName())
-		return errors.New("re-authentication declined")
+//
+// Under --auth-code-stdin (two-phase install) there is no TTY to prompt on
+// and stdin is reserved for the auth code, so the confirmation is skipped:
+// the caller only reaches here when the stored token is already unusable,
+// and a scripted install asking for a fresh token is its own consent.
+func promptAndDeleteForReauth(d initDeps, opts *initOptions) error {
+	if opts.authCodeStdin {
+		d.View.Info("Re-authenticating (--auth-code-stdin; skipping confirmation).")
+	} else {
+		confirm, err := d.Prompter.ConfirmReauth()
+		if err != nil {
+			return err
+		}
+		if !confirm {
+			d.View.Info("Run '%s config clear' to remove the stored token.", config.ProductName())
+			return errors.New("re-authentication declined")
+		}
 	}
 	if err := d.DeleteToken(); err != nil {
 		return fmt.Errorf("clearing token: %w", err)
@@ -760,20 +769,37 @@ func extractAuthCode(input string) string {
 	return input
 }
 
-// isAuthError is preserved from the original implementation.
+// isAuthError reports whether err means the stored token no longer
+// authenticates — i.e. re-auth is the fix — as opposed to a transient
+// network/API failure.
 func isAuthError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// An expired/revoked refresh token fails inside the oauth2 transport
+	// (the request never reaches the API): the token endpoint returns HTTP
+	// 400 with error code "invalid_grant", surfaced as *oauth2.RetrieveError.
+	// Without this branch, init hard-fails on the exact scenario it exists
+	// to fix — Testing-mode OAuth apps expire their refresh tokens every 7
+	// days, and the resulting error carries no 401 for the fallback below.
+	var retrieveErr *oauth2.RetrieveError
+	if ok := errorAs(err, &retrieveErr); ok && retrieveErr.ErrorCode == "invalid_grant" {
+		return true
 	}
 	var apiErr *googleapi.Error
 	if ok := errorAs(err, &apiErr); ok {
 		return apiErr.Code == http.StatusUnauthorized
 	}
+	// String fallback for wrapped/legacy error shapes. "invalid_grant" and
+	// "Token has been expired or revoked" only ever come from the OAuth
+	// token endpoint's error response, so they are safe to treat as
+	// definitive without a status code; a bare 401 still needs corroboration.
 	errStr := err.Error()
-	return strings.Contains(errStr, "401") &&
-		(strings.Contains(errStr, "Invalid Credentials") ||
-			strings.Contains(errStr, "invalid_grant") ||
-			strings.Contains(errStr, "Token has been expired or revoked"))
+	if strings.Contains(errStr, "invalid_grant") ||
+		strings.Contains(errStr, "Token has been expired or revoked") {
+		return true
+	}
+	return strings.Contains(errStr, "401") && strings.Contains(errStr, "Invalid Credentials")
 }
 
 var errorAs = errors.As
