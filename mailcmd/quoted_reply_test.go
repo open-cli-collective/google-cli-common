@@ -43,8 +43,13 @@ func TestElideQuotedReplyBody(t *testing.T) {
 			elided: true,
 		},
 		{
-			name:   "Outlook header block",
-			body:   "Authored reply.\n\nFrom: [author]\nSent: [date]\nTo: [recipient]\nSubject: [subject]\n\nOlder message",
+			name: "bare Outlook header collision is preserved",
+			body: "Authored reply.\n\nFrom: [author]\nSent: [date]\nTo: [recipient]\nSubject: [subject]\n\nPasted content",
+			want: "Authored reply.\n\nFrom: [author]\nSent: [date]\nTo: [recipient]\nSubject: [subject]\n\nPasted content",
+		},
+		{
+			name:   "Outlook divider before header block",
+			body:   "Authored reply.\n\n________________________________\nFrom: [author]\nSent: [date]\nTo: [recipient]\nSubject: [subject]\n\nOlder message",
 			want:   "Authored reply.\n\n" + quotedReplyMarkerForTest,
 			elided: true,
 		},
@@ -120,6 +125,13 @@ func TestElideQuotedReplyBody(t *testing.T) {
 			elided: true,
 		},
 		{
+			name:   "balanced HTML fragment with void element",
+			body:   `<p>Authored reply.<br></p><div class="gmail_quote"><p>Older message<br></p></div>`,
+			isHTML: true,
+			want:   `<p>Authored reply.<br/></p>` + quotedReplyMarkerForTest,
+			elided: true,
+		},
+		{
 			name:   "Thunderbird HTML quote",
 			body:   `<p>Authored reply.</p><blockquote type="cite">Older message</blockquote>`,
 			isHTML: true,
@@ -134,11 +146,10 @@ func TestElideQuotedReplyBody(t *testing.T) {
 			elided: true,
 		},
 		{
-			name:   "Outlook HTML quote",
-			body:   `<div>Authored reply.</div><div id="divRplyFwdMsg"><div><b>From:</b> [author]</div><div><b>Subject:</b> [subject]</div></div>`,
+			name:   "ambiguous Outlook reply-forward wrapper is preserved byte-for-byte",
+			body:   `<div>Authored reply.</div><div id="divRplyFwdMsg"><div><b>From:</b> [author]</div><div><b>Sent:</b> [date]</div><div><b>To:</b> [recipient]</div><div><b>Subject:</b> [subject]</div><div>Older message</div></div>`,
 			isHTML: true,
-			want:   `<div>Authored reply.</div>` + quotedReplyMarkerForTest,
-			elided: true,
+			want:   `<div>Authored reply.</div><div id="divRplyFwdMsg"><div><b>From:</b> [author]</div><div><b>Sent:</b> [date]</div><div><b>To:</b> [recipient]</div><div><b>Subject:</b> [subject]</div><div>Older message</div></div>`,
 		},
 		{
 			name:   "Outlook border-style header wrapper",
@@ -184,6 +195,12 @@ func TestElideQuotedReplyBody(t *testing.T) {
 			body:   `<p>Authored reply.<div class="gmail_quote">Older message`,
 			isHTML: true,
 			want:   `<p>Authored reply.<div class="gmail_quote">Older message`,
+		},
+		{
+			name:   "malformed enclosing HTML is preserved",
+			body:   `<div><p>Authored reply.</p><div class="gmail_quote"><p>Older message</p></div>`,
+			isHTML: true,
+			want:   `<div><p>Authored reply.</p><div class="gmail_quote"><p>Older message</p></div>`,
 		},
 	}
 

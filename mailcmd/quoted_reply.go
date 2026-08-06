@@ -41,10 +41,7 @@ func elideQuotedReplyPlain(body string) (string, bool) {
 			return body[:line.start] + quotedReplyElisionMarker, true
 		}
 		trimmed := strings.TrimSpace(line.text)
-		if isReplyHistoryMarker(trimmed) && hasReplyHeaderBlock(lines, i+1) {
-			return body[:line.start] + quotedReplyElisionMarker, true
-		}
-		if isOutlookHeaderStart(lines, i) && hasReplyHeaderBlock(lines, i) {
+		if (isReplyHistoryMarker(trimmed) || isOutlookReplyDivider(trimmed)) && hasReplyHeaderBlock(lines, i+1) {
 			return body[:line.start] + quotedReplyElisionMarker, true
 		}
 	}
@@ -151,11 +148,16 @@ func isReplyHistoryMarker(line string) bool {
 	return strings.Contains(lower, "original message") || strings.Contains(lower, "reply message")
 }
 
-func isOutlookHeaderStart(lines []replyTextLine, index int) bool {
-	if replyHeaderName(lines[index].text) != "from" {
+func isOutlookReplyDivider(line string) bool {
+	if len(line) < 8 {
 		return false
 	}
-	return index == 0 || strings.TrimSpace(lines[index-1].text) == ""
+	for _, char := range line {
+		if char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func hasReplyHeaderBlock(lines []replyTextLine, start int) bool {
@@ -207,7 +209,7 @@ func elideQuotedReplyHTML(body string) (string, bool) {
 		return body, false
 	}
 	candidate := terminalHTMLQuote(bodyNode)
-	if candidate == nil || !htmlQuoteHasExplicitClose(body, candidate) {
+	if candidate == nil || !htmlHasExplicitBalance(body) {
 		return body, false
 	}
 
@@ -345,7 +347,7 @@ func isHTMLQuoteContainer(node *xhtml.Node) bool {
 	}
 	id := strings.ToLower(htmlAttribute(node, "id"))
 	switch id {
-	case "divrplyfwdmsg", "olk_src_body_section", "zmail_extra":
+	case "olk_src_body_section", "zmail_extra":
 		return true
 	}
 	if isZimbraDivider(node) {
@@ -440,121 +442,37 @@ func hasHTMLClass(classes, want string) bool {
 	return false
 }
 
-func htmlQuoteHasExplicitClose(body string, candidate *xhtml.Node) bool {
-	type openTag struct {
-		name       string
-		quoteIndex int
-	}
-
-	targetIndex := htmlQuoteIndex(candidate)
-	if targetIndex < 0 {
-		return false
-	}
+func htmlHasExplicitBalance(body string) bool {
 	tokenizer := xhtml.NewTokenizer(strings.NewReader(body))
-	open := make([]openTag, 0, 8)
-	quoteClosed := make([]bool, 0, 2)
+	open := make([]string, 0, 8)
 	for {
-		tokenType := tokenizer.Next()
-		switch tokenType {
+		switch tokenizer.Next() {
 		case xhtml.ErrorToken:
-			return targetIndex < len(quoteClosed) && quoteClosed[targetIndex]
+			return len(open) == 0
 		case xhtml.StartTagToken:
 			token := tokenizer.Token()
-			quoteIndex := -1
-			if isHTMLQuoteToken(token) {
-				quoteIndex = len(quoteClosed)
-				quoteClosed = append(quoteClosed, isHTMLQuoteVoidToken(token))
+			if !isHTMLVoidElement(token.Data) {
+				open = append(open, token.Data)
 			}
-			open = append(open, openTag{name: token.Data, quoteIndex: quoteIndex})
 		case xhtml.SelfClosingTagToken:
-			token := tokenizer.Token()
-			quoteIndex := -1
-			if isHTMLQuoteToken(token) {
-				quoteIndex = len(quoteClosed)
-				quoteClosed = append(quoteClosed, true)
-			}
-			open = append(open, openTag{name: token.Data, quoteIndex: quoteIndex})
 		case xhtml.EndTagToken:
 			token := tokenizer.Token()
-			for index := len(open) - 1; index >= 0; index-- {
-				if strings.EqualFold(open[index].name, token.Data) {
-					if open[index].quoteIndex >= 0 {
-						quoteClosed[open[index].quoteIndex] = true
-					}
-					open = open[:index]
-					break
-				}
+			if len(open) == 0 || !strings.EqualFold(open[len(open)-1], token.Data) {
+				return false
 			}
+			open = open[:len(open)-1]
 		case xhtml.TextToken, xhtml.CommentToken, xhtml.DoctypeToken:
 		}
 	}
 }
 
-func htmlQuoteIndex(candidate *xhtml.Node) int {
-	root := candidate
-	for root.Parent != nil {
-		root = root.Parent
-	}
-
-	index := -1
-	count := 0
-	var visit func(*xhtml.Node)
-	visit = func(node *xhtml.Node) {
-		if isHTMLQuoteContainer(node) {
-			if node == candidate {
-				index = count
-			}
-			count++
-		}
-		for child := node.FirstChild; child != nil; child = child.NextSibling {
-			visit(child)
-		}
-	}
-	visit(root)
-	return index
-}
-
-func isHTMLQuoteToken(token xhtml.Token) bool {
-	class := ""
-	id := ""
-	typeAttr := ""
-	for _, attr := range token.Attr {
-		switch strings.ToLower(attr.Key) {
-		case "class":
-			class = attr.Val
-		case "id":
-			id = strings.ToLower(attr.Val)
-		case "type":
-			typeAttr = attr.Val
-		}
-	}
-	if hasHTMLClass(class, "gmail_quote") {
+func isHTMLVoidElement(name string) bool {
+	switch strings.ToLower(name) {
+	case "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr":
 		return true
+	default:
+		return false
 	}
-	switch id {
-	case "divrplyfwdmsg", "olk_src_body_section", "zmail_extra":
-		return true
-	}
-	if strings.EqualFold(token.Data, "hr") && htmlAttributeToken(token, "data-marker") == "__DIVIDER__" {
-		return true
-	}
-	if strings.EqualFold(token.Data, "div") && strings.Contains(strings.ToLower(htmlAttributeToken(token, "style")), "border-top") {
-		return true
-	}
-	return strings.EqualFold(token.Data, "blockquote") && strings.EqualFold(typeAttr, "cite")
-}
-
-func isHTMLQuoteVoidToken(token xhtml.Token) bool {
-	return strings.EqualFold(token.Data, "hr") && htmlAttributeToken(token, "data-marker") == "__DIVIDER__"
-}
-
-func htmlAttributeToken(token xhtml.Token, name string) string {
-	for _, attr := range token.Attr {
-		if strings.EqualFold(attr.Key, name) {
-			return attr.Val
-		}
-	}
-	return ""
 }
 
 func isHTMLDocument(body string) bool {
