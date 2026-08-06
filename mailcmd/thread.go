@@ -7,6 +7,8 @@ import (
 )
 
 func newThreadCommand() *cobra.Command {
+	var includeQuotedReplyBodies bool
+
 	cmd := &cobra.Command{
 		Use:   "thread <id>",
 		Short: "Read a full conversation thread",
@@ -40,8 +42,9 @@ Examples:
 			for i, msg := range messages {
 				fmt.Printf("=== Message %d of %d ===\n", i+1, len(messages))
 				printMessageHeader(msg, MessagePrintOptions{
-					IncludeTo:   true,
-					IncludeBody: true,
+					IncludeTo:                true,
+					IncludeBody:              true,
+					IncludeQuotedReplyBodies: includeQuotedReplyBodies,
 				})
 				fmt.Println()
 			}
@@ -49,6 +52,8 @@ Examples:
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&includeQuotedReplyBodies, "include-quoted-reply-bodies", false,
+		"Include complete quoted reply history in message bodies")
 
 	return cmd
 }

@@ -7,6 +7,8 @@ import (
 )
 
 func newReadCommand() *cobra.Command {
+	var includeQuotedReplyBodies bool
+
 	cmd := &cobra.Command{
 		Use:   "read <message-id>",
 		Short: "Read a single message",
@@ -29,13 +31,16 @@ Examples:
 			}
 
 			printMessageHeader(msg, MessagePrintOptions{
-				IncludeTo:   true,
-				IncludeBody: true,
+				IncludeTo:                true,
+				IncludeBody:              true,
+				IncludeQuotedReplyBodies: includeQuotedReplyBodies,
 			})
 
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&includeQuotedReplyBodies, "include-quoted-reply-bodies", false,
+		"Include complete quoted reply history in message bodies")
 
 	return cmd
 }

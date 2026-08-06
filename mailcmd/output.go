@@ -41,10 +41,11 @@ func newGmailClient(ctx context.Context) (MailClient, error) {
 
 // MessagePrintOptions controls which fields to include in message output
 type MessagePrintOptions struct {
-	IncludeThreadID bool
-	IncludeTo       bool
-	IncludeSnippet  bool
-	IncludeBody     bool
+	IncludeThreadID          bool
+	IncludeTo                bool
+	IncludeSnippet           bool
+	IncludeBody              bool
+	IncludeQuotedReplyBodies bool
 }
 
 // printMessageHeader prints the common header fields of a message
@@ -70,7 +71,11 @@ func printMessageHeader(msg *gmail.Message, opts MessagePrintOptions) {
 		fmt.Printf("Snippet: %s\n", SanitizeOutput(msg.Snippet))
 	}
 	if opts.IncludeBody {
+		body := msg.Body
+		if !opts.IncludeQuotedReplyBodies {
+			body, _ = elideQuotedReplyBody(body, msg.BodyIsHTML)
+		}
 		fmt.Print("\n--- Body ---\n\n")
-		fmt.Println(SanitizeOutput(msg.Body))
+		fmt.Println(SanitizeOutput(body))
 	}
 }

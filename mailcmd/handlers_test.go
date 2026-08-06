@@ -165,6 +165,58 @@ func TestReadCommand_Success(t *testing.T) {
 	})
 }
 
+func syntheticQuotedReplyMessage(id string) *gmailapi.Message {
+	return &gmailapi.Message{
+		ID:      id,
+		Subject: "Synthetic subject",
+		Body:    "Authored reply.\n\nOn [date], [author] wrote:\n> quoted history",
+	}
+}
+
+func TestReadCommand_ElidesQuotedReplyByDefault(t *testing.T) {
+	mock := &MockGmailClient{
+		GetMessageFunc: func(_ context.Context, messageID string, includeBody bool) (*gmailapi.Message, error) {
+			testutil.Equal(t, messageID, "synthetic-message")
+			testutil.True(t, includeBody)
+			return syntheticQuotedReplyMessage(messageID), nil
+		},
+	}
+
+	cmd := newReadCommand()
+	cmd.SetArgs([]string{"synthetic-message"})
+
+	withMockClient(mock, func() {
+		output := testutil.CaptureStdout(t, func() {
+			testutil.NoError(t, cmd.Execute())
+		})
+
+		testutil.Contains(t, output, "Authored reply.")
+		testutil.Contains(t, output, quotedReplyMarkerForTest)
+		testutil.NotContains(t, output, "quoted history")
+	})
+}
+
+func TestReadCommand_IncludesQuotedReplyBodies(t *testing.T) {
+	mock := &MockGmailClient{
+		GetMessageFunc: func(_ context.Context, messageID string, includeBody bool) (*gmailapi.Message, error) {
+			testutil.True(t, includeBody)
+			return syntheticQuotedReplyMessage(messageID), nil
+		},
+	}
+
+	cmd := newReadCommand()
+	cmd.SetArgs([]string{"synthetic-message", "--include-quoted-reply-bodies"})
+
+	withMockClient(mock, func() {
+		output := testutil.CaptureStdout(t, func() {
+			testutil.NoError(t, cmd.Execute())
+		})
+
+		testutil.Contains(t, output, "Authored reply.\n\nOn [date], [author] wrote:\n> quoted history")
+		testutil.NotContains(t, output, quotedReplyMarkerForTest)
+	})
+}
+
 func TestReadCommand_NotFound(t *testing.T) {
 	mock := &MockGmailClient{
 		GetMessageFunc: func(_ context.Context, _ string, _ bool) (*gmailapi.Message, error) {
@@ -203,6 +255,48 @@ func TestThreadCommand_Success(t *testing.T) {
 		testutil.Contains(t, output, "Message 1 of 3")
 		testutil.Contains(t, output, "Message 2 of 3")
 		testutil.Contains(t, output, "Message 3 of 3")
+	})
+}
+
+func TestThreadCommand_ElidesQuotedReplyByDefault(t *testing.T) {
+	mock := &MockGmailClient{
+		GetThreadFunc: func(_ context.Context, id string) ([]*gmailapi.Message, error) {
+			testutil.Equal(t, id, "synthetic-thread")
+			return []*gmailapi.Message{syntheticQuotedReplyMessage("synthetic-message")}, nil
+		},
+	}
+
+	cmd := newThreadCommand()
+	cmd.SetArgs([]string{"synthetic-thread"})
+
+	withMockClient(mock, func() {
+		output := testutil.CaptureStdout(t, func() {
+			testutil.NoError(t, cmd.Execute())
+		})
+
+		testutil.Contains(t, output, "Authored reply.")
+		testutil.Contains(t, output, quotedReplyMarkerForTest)
+		testutil.NotContains(t, output, "quoted history")
+	})
+}
+
+func TestThreadCommand_IncludesQuotedReplyBodies(t *testing.T) {
+	mock := &MockGmailClient{
+		GetThreadFunc: func(_ context.Context, _ string) ([]*gmailapi.Message, error) {
+			return []*gmailapi.Message{syntheticQuotedReplyMessage("synthetic-message")}, nil
+		},
+	}
+
+	cmd := newThreadCommand()
+	cmd.SetArgs([]string{"synthetic-thread", "--include-quoted-reply-bodies"})
+
+	withMockClient(mock, func() {
+		output := testutil.CaptureStdout(t, func() {
+			testutil.NoError(t, cmd.Execute())
+		})
+
+		testutil.Contains(t, output, "Authored reply.\n\nOn [date], [author] wrote:\n> quoted history")
+		testutil.NotContains(t, output, quotedReplyMarkerForTest)
 	})
 }
 
