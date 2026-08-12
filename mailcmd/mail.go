@@ -13,6 +13,7 @@ func NewCommand() *cobra.Command {
 		Long: `Access to Gmail messages, threads, attachments, and organizational operations.
 
 This command group provides Gmail functionality:
+- list: List recent inbox messages
 - search: Search for messages using Gmail query syntax
 - read: Read a single message
 - thread: Read a full conversation thread
@@ -31,12 +32,14 @@ All organizational commands support bulk operations via positional IDs,
 --stdin (for piping), or --query (inline search).
 
 Examples:
+  mail list
   mail search "is:unread"
   mail read <message-id>
   mail archive --query "from:noreply older_than:30d"
   mail search "is:inbox" --ids | mail star --stdin`,
 	}
 
+	cmd.AddCommand(newListCommand())
 	cmd.AddCommand(newSearchCommand())
 	cmd.AddCommand(newReadCommand())
 	cmd.AddCommand(newThreadCommand())
