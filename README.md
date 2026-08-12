@@ -43,8 +43,8 @@ and the derived `<SERVICE>_KEYRING_BACKEND` / `<SERVICE>_KEYRING_PASSPHRASE` /
 | --- | --- |
 | `config`, `keychain`, `auth` | Config file, OS-keyring token storage, and the Google OAuth flow |
 | `gmail`, `calendar`, `contacts`, `drive`, `people` | API clients and data models |
-| `mailcmd`, `initcmd`, `configcmd`, `setcred`, `refreshcmd`, `rootutil` | Shared cobra command packages and root scaffolding |
-| `bulk`, `output`, `format`, `view`, `errors`, `log`, `cache`, `zip`, `version` | Rendering, bulk-operation, and support utilities |
+| `mailcmd`, `initcmd`, `configcmd`, `setcred`, `refreshcmd`, `profilescmd`, `rootutil` | Shared cobra command packages and root scaffolding |
+| `bulk`, `output`, `format`, `view`, `errors`, `log`, `cache`, `identitycache`, `zip`, `version` | Rendering, bulk-operation, and support utilities |
 | `testutil`, `credtest` | Test fixtures, assertions, and a hermetic credential environment |
 
 ## Development

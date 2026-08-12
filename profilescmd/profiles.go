@@ -145,7 +145,12 @@ func runList(ctx context.Context, jsonOut, check bool) error {
 			row.VerifiedAt = e.VerifiedAt.Format(time.RFC3339)
 		}
 		if check {
-			row.Health = checkProfile(ctx, p, ref, present, &row)
+			health, email, verifiedAt := checkProfile(ctx, p, ref, present)
+			row.Health = health
+			if email != "" {
+				row.Email = email
+				row.VerifiedAt = verifiedAt.Format(time.RFC3339)
+			}
 		}
 		rows = append(rows, row)
 	}
@@ -190,26 +195,25 @@ func runList(ctx context.Context, jsonOut, check bool) error {
 	return nil
 }
 
-// checkProfile classifies one profile's live token state. The email learned
-// from a healthy check refreshes the identity cache (best-effort) and the
-// row, so --check is also how a listing heals missing/stale emails.
-func checkProfile(ctx context.Context, profile, ref string, present bool, row *profileRow) string {
+// checkProfile classifies one profile's live token state, returning the
+// health label plus the verified email/time (both zero unless healthy). The
+// email learned from a healthy check also refreshes the identity cache
+// (best-effort), so --check is how a listing heals missing/stale emails.
+func checkProfile(ctx context.Context, profile, ref string, present bool) (health, email string, verifiedAt time.Time) {
 	if !present {
-		return "no token"
+		return "no token", "", time.Time{}
 	}
 	email, err := VerifyRef(ctx, ref)
 	if err != nil {
 		if auth.IsAuthError(err) {
-			return "expired or revoked"
+			return "expired or revoked", "", time.Time{}
 		}
-		return "error: " + firstLine(err.Error())
+		return "error: " + firstLine(err.Error()), "", time.Time{}
 	}
-	row.Email = email
-	row.VerifiedAt = time.Now().UTC().Format(time.RFC3339)
 	if cerr := identitycache.Put(profile, email); cerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: could not cache identity for %s: %v\n", profile, cerr)
 	}
-	return "ok"
+	return "ok", email, time.Now().UTC()
 }
 
 func newUseCommand() *cobra.Command {

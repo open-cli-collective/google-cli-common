@@ -4,6 +4,7 @@ package gmail
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 
 	"google.golang.org/api/gmail/v1"
@@ -28,16 +29,7 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading OAuth client: %w", err)
 	}
-
-	srv, err := gmail.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		return nil, fmt.Errorf("creating Gmail service: %w", err)
-	}
-
-	return &Client{
-		service: srv,
-		userID:  "me",
-	}, nil
+	return newClientWithHTTP(ctx, client)
 }
 
 // NewClientForRef is NewClient bound to an explicit credential ref instead of
@@ -48,12 +40,16 @@ func NewClientForRef(ctx context.Context, ref string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading OAuth client: %w", err)
 	}
+	return newClientWithHTTP(ctx, client)
+}
 
+// newClientWithHTTP is the single construction site both entry points share,
+// so the service wiring and Client shape cannot drift between them.
+func newClientWithHTTP(ctx context.Context, client *http.Client) (*Client, error) {
 	srv, err := gmail.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
 		return nil, fmt.Errorf("creating Gmail service: %w", err)
 	}
-
 	return &Client{
 		service: srv,
 		userID:  "me",

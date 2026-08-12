@@ -70,7 +70,12 @@ func TestLoadToleratesCorruptFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, FileName), []byte("{not json"), 0o600); err != nil {
+	// The envelope file lives at <cachedir>/<instanceKey>/<resource>.json.
+	sub := filepath.Join(dir, "default")
+	if err := os.MkdirAll(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "profile_identities.json"), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if got := Load(); len(got) != 0 {
