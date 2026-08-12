@@ -305,6 +305,30 @@ func (s *Store) HasToken() (bool, error) {
 	return ok, nil
 }
 
+// ListProfiles returns the sorted profiles that have at least one stored key
+// under this CLI's keyring service — stored reality, not allowlist-gated
+// (mirrors credstore.ListProfiles). It backs `profiles list`, so discovering
+// which accounts exist no longer requires dumping the OS keychain by hand.
+func (s *Store) ListProfiles() ([]string, error) {
+	profiles, err := s.cs.ListProfiles()
+	if err != nil {
+		return nil, fmt.Errorf("list profiles for %s: %w", s.service, err)
+	}
+	return profiles, nil
+}
+
+// HasTokenFor reports token presence under an arbitrary profile of the same
+// service, without returning the value. `profiles list` needs cross-profile
+// presence; reopening the backing store per profile would be waste — the
+// credstore handle is service-scoped, not profile-scoped.
+func (s *Store) HasTokenFor(profile string) (bool, error) {
+	ok, err := s.cs.Exists(profile, KeyOAuthToken)
+	if err != nil {
+		return false, fmt.Errorf("check %s at %s/%s: %w", KeyOAuthToken, s.service, profile, err)
+	}
+	return ok, nil
+}
+
 // EnsureMigrated runs (and resolves) the one-time §1.8 legacy migration up
 // front via the full Open() path, then closes. A legacy-vs-keyring conflict
 // surfaces as a hard error. Shared by `gro init` and `gro set-credential` so

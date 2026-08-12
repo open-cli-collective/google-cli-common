@@ -81,15 +81,37 @@ func GetOAuthConfig() (*oauth2.Config, error) {
 // exact ref via the closure passed to the token source (the sole sanctioned
 // non-ingress keyring write). Returns an actionable error if no token exists.
 func GetHTTPClient(ctx context.Context) (*http.Client, error) {
-	oauthCfg, err := GetOAuthConfig()
-	if err != nil {
-		return nil, err
-	}
-
 	st, err := keychain.Open()
 	if err != nil {
 		return nil, err
 	}
+	return clientFromStore(ctx, st)
+}
+
+// GetHTTPClientForRef is GetHTTPClient bound to an explicit credential ref
+// instead of the active one — the seam behind `profiles list --check`, which
+// probes every stored profile's token, not just the active profile's. Opens
+// via keychain.OpenRef, so the one-time migration never runs against a
+// non-active ref.
+func GetHTTPClientForRef(ctx context.Context, ref string) (*http.Client, error) {
+	st, err := keychain.OpenRef(ref)
+	if err != nil {
+		return nil, err
+	}
+	return clientFromStore(ctx, st)
+}
+
+// clientFromStore builds the authenticated client from an already-open Store,
+// closing it before returning (the client must not hold the Store for its
+// lifetime). Shared by the active-ref and explicit-ref entry points so the
+// persist-on-refresh and error-attribution behavior can't diverge.
+func clientFromStore(ctx context.Context, st *keychain.Store) (*http.Client, error) {
+	oauthCfg, err := GetOAuthConfig()
+	if err != nil {
+		_ = st.Close()
+		return nil, err
+	}
+
 	tok, err := st.Token()
 	if err != nil {
 		_ = st.Close()

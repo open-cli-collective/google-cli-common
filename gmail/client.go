@@ -40,6 +40,26 @@ func NewClient(ctx context.Context) (*Client, error) {
 	}, nil
 }
 
+// NewClientForRef is NewClient bound to an explicit credential ref instead of
+// the active one. It exists for `profiles list --check`, which live-verifies
+// every stored profile's token in one process.
+func NewClientForRef(ctx context.Context, ref string) (*Client, error) {
+	client, err := auth.GetHTTPClientForRef(ctx, ref)
+	if err != nil {
+		return nil, fmt.Errorf("loading OAuth client: %w", err)
+	}
+
+	srv, err := gmail.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("creating Gmail service: %w", err)
+	}
+
+	return &Client{
+		service: srv,
+		userID:  "me",
+	}, nil
+}
+
 // Service returns the underlying Gmail API service. It exists so sibling CLIs
 // built on this library (e.g. google-readwrite) can implement additional Gmail
 // operations — label lifecycle, filters, trash/delete — by embedding *Client
