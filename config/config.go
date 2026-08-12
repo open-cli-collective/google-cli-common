@@ -76,7 +76,39 @@ type Config struct {
 	GrantedScopes []string `yaml:"granted_scopes,omitempty" json:"granted_scopes,omitempty"`
 	// Keyring carries the optional §1.4 explicit file-backend opt-in.
 	Keyring KeyringConfig `yaml:"keyring,omitempty" json:"-"`
+
+	// credentialRefSource records where the resolved CredentialRef came from
+	// (config.yml vs the built-in default; the keychain layer upgrades it to
+	// flag/env when a per-invocation override applies). Unexported so it is
+	// never serialized: it is provenance for error attribution and `config
+	// show`, not configuration.
+	credentialRefSource RefSource
 }
+
+// RefSource identifies where the resolved CredentialRef came from, so auth
+// errors and `config show` can attribute the active profile to its source
+// instead of leaving the user to guess which of flag/env/config selected it.
+type RefSource string
+
+// RefSource values, in precedence order (flag > env > config > default).
+// RefSourceExplicit marks a caller-supplied ref (set-credential --ref, the
+// refresh persister) that bypassed the precedence chain.
+const (
+	RefSourceFlag     RefSource = "flag"
+	RefSourceEnv      RefSource = "env"
+	RefSourceConfig   RefSource = "config"
+	RefSourceDefault  RefSource = "default"
+	RefSourceExplicit RefSource = "explicit"
+)
+
+// CredentialRefSource returns the recorded provenance of CredentialRef.
+// Empty for a Config constructed directly (tests) rather than loaded.
+func (c *Config) CredentialRefSource() RefSource { return c.credentialRefSource }
+
+// SetCredentialRefSource records CredentialRef provenance. Called by the
+// keychain layer when a per-invocation override (flag/env) or an explicit
+// caller-supplied ref replaces the loaded value.
+func (c *Config) SetCredentialRefSource(s RefSource) { c.credentialRefSource = s }
 
 // KeyringConfig is the §1.4 backend selector. Backend == "file" forces the
 // encrypted-file backend; empty means OS default selection (fail-closed on
@@ -349,6 +381,9 @@ func loadLegacyJSON(cfg *Config) error {
 func (c *Config) applyDefaults() {
 	if c.CredentialRef == "" {
 		c.CredentialRef = DefaultCredentialRef
+		c.credentialRefSource = RefSourceDefault
+	} else {
+		c.credentialRefSource = RefSourceConfig
 	}
 	if c.OAuthClientPath == "" {
 		if p, err := DefaultOAuthClientPath(); err == nil {

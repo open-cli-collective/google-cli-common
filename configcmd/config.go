@@ -125,6 +125,7 @@ The OAuth client JSON (deployment material) is never removed.`,
 // masked prefix.
 type showStatus struct {
 	CredentialRef          string `json:"credential_ref"`
+	CredentialRefSource    string `json:"credential_ref_source,omitempty"`
 	Backend                string `json:"backend"`
 	BackendSource          string `json:"backend_source"`
 	KeyringBackend         string `json:"keyring_backend,omitempty"` // selector from config.yml (keyring.backend)
@@ -157,13 +158,14 @@ func runShow(jsonOut, verbose bool) error {
 	}
 	backend, src := st.Backend()
 	status := showStatus{
-		CredentialRef:      st.Ref(),
-		Backend:            string(backend),
-		BackendSource:      string(src),
-		KeyringBackend:     cfg.Keyring.Backend, // selector value from config.yml; "" if unset
-		OAuthTokenPresent:  hasTok,
-		OAuthClientPath:    config.ShortenPath(cfg.OAuthClientPath),
-		OAuthClientPresent: false,
+		CredentialRef:       st.Ref(),
+		CredentialRefSource: string(st.RefSource()),
+		Backend:             string(backend),
+		BackendSource:       string(src),
+		KeyringBackend:      cfg.Keyring.Backend, // selector value from config.yml; "" if unset
+		OAuthTokenPresent:   hasTok,
+		OAuthClientPath:     config.ShortenPath(cfg.OAuthClientPath),
+		OAuthClientPresent:  false,
 	}
 	if backend == credstore.BackendFile {
 		status.PassphraseSource = keychain.PassphraseSource(st.Service())
@@ -180,7 +182,7 @@ func runShow(jsonOut, verbose bool) error {
 		return output.JSONStdout(status)
 	}
 
-	fmt.Printf("Credential ref:      %s\n", status.CredentialRef)
+	fmt.Printf("Credential ref:      %s (via %s)\n", status.CredentialRef, keychain.DescribeRefSource(st.RefSource()))
 	fmt.Printf("Backend:             %s (%s)\n", status.Backend, status.BackendSource)
 	if status.KeyringBackend != "" {
 		fmt.Printf("keyring.backend:     %s (config.yml)\n", status.KeyringBackend)

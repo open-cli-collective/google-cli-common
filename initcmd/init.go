@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,7 +18,6 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
-	"google.golang.org/api/googleapi"
 
 	"github.com/open-cli-collective/google-cli-common/auth"
 	"github.com/open-cli-collective/google-cli-common/config"
@@ -525,7 +523,7 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 
 	email, err := d.GmailVerify(ctx)
 	if err != nil {
-		if isAuthError(err) {
+		if auth.IsAuthError(err) {
 			d.View.Error("Stored token is expired or revoked.")
 			if err := promptAndDeleteForReauth(d, opts); err != nil {
 				return false, err
@@ -768,41 +766,6 @@ func extractAuthCode(input string) string {
 	}
 	return input
 }
-
-// isAuthError reports whether err means the stored token no longer
-// authenticates — i.e. re-auth is the fix — as opposed to a transient
-// network/API failure.
-func isAuthError(err error) bool {
-	if err == nil {
-		return false
-	}
-	// An expired/revoked refresh token fails inside the oauth2 transport
-	// (the request never reaches the API): the token endpoint returns HTTP
-	// 400 with error code "invalid_grant", surfaced as *oauth2.RetrieveError.
-	// Without this branch, init hard-fails on the exact scenario it exists
-	// to fix — Testing-mode OAuth apps expire their refresh tokens every 7
-	// days, and the resulting error carries no 401 for the fallback below.
-	var retrieveErr *oauth2.RetrieveError
-	if ok := errorAs(err, &retrieveErr); ok && retrieveErr.ErrorCode == "invalid_grant" {
-		return true
-	}
-	var apiErr *googleapi.Error
-	if ok := errorAs(err, &apiErr); ok {
-		return apiErr.Code == http.StatusUnauthorized
-	}
-	// String fallback for wrapped/legacy error shapes. "invalid_grant" and
-	// "Token has been expired or revoked" only ever come from the OAuth
-	// token endpoint's error response, so they are safe to treat as
-	// definitive without a status code; a bare 401 still needs corroboration.
-	errStr := err.Error()
-	if strings.Contains(errStr, "invalid_grant") ||
-		strings.Contains(errStr, "Token has been expired or revoked") {
-		return true
-	}
-	return strings.Contains(errStr, "401") && strings.Contains(errStr, "Invalid Credentials")
-}
-
-var errorAs = errors.As
 
 // workspaceAdminsURL points to the repo's Workspace-admin walkthrough.
 // Referenced from both cmd.Long and the runtime wizard, so installed-CLI

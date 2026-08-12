@@ -30,18 +30,18 @@ func TestEffectiveRef_Precedence(t *testing.T) {
 	t.Run("config only", func(t *testing.T) {
 		resetCredRefOverride(t)
 		t.Setenv(CredentialRefEnvVar(), "")
-		ref, ov := effectiveRef(cfgRef)
-		if ref != cfgRef || ov {
-			t.Errorf("got (%q,%v), want (%q,false)", ref, ov, cfgRef)
+		ref, src, ov := effectiveRef(cfgRef)
+		if ref != cfgRef || ov || src != "" {
+			t.Errorf("got (%q,%q,%v), want (%q,\"\",false)", ref, src, ov, cfgRef)
 		}
 	})
 
 	t.Run("env overrides config", func(t *testing.T) {
 		resetCredRefOverride(t)
 		t.Setenv(CredentialRefEnvVar(), "google-readonly/env")
-		ref, ov := effectiveRef(cfgRef)
-		if ref != "google-readonly/env" || !ov {
-			t.Errorf("got (%q,%v), want (google-readonly/env,true)", ref, ov)
+		ref, src, ov := effectiveRef(cfgRef)
+		if ref != "google-readonly/env" || !ov || src != config.RefSourceEnv {
+			t.Errorf("got (%q,%q,%v), want (google-readonly/env,env,true)", ref, src, ov)
 		}
 	})
 
@@ -49,9 +49,9 @@ func TestEffectiveRef_Precedence(t *testing.T) {
 		resetCredRefOverride(t)
 		t.Setenv(CredentialRefEnvVar(), "google-readonly/env")
 		SetCredentialRefOverride("google-readonly/flag", true)
-		ref, ov := effectiveRef(cfgRef)
-		if ref != "google-readonly/flag" || !ov {
-			t.Errorf("got (%q,%v), want (google-readonly/flag,true)", ref, ov)
+		ref, src, ov := effectiveRef(cfgRef)
+		if ref != "google-readonly/flag" || !ov || src != config.RefSourceFlag {
+			t.Errorf("got (%q,%q,%v), want (google-readonly/flag,flag,true)", ref, src, ov)
 		}
 	})
 
@@ -59,7 +59,7 @@ func TestEffectiveRef_Precedence(t *testing.T) {
 		resetCredRefOverride(t)
 		t.Setenv(CredentialRefEnvVar(), "")
 		SetCredentialRefOverride("", true) // Changed=true but no value
-		ref, ov := effectiveRef(cfgRef)
+		ref, _, ov := effectiveRef(cfgRef)
 		if ref != cfgRef || ov {
 			t.Errorf("got (%q,%v), want (%q,false) — empty --ref must fall through", ref, ov, cfgRef)
 		}
@@ -101,6 +101,9 @@ func TestApplyCredentialRefOverride(t *testing.T) {
 		if cfg.CredentialRef != "google-readonly/flag" {
 			t.Errorf("cfg.CredentialRef = %q, want google-readonly/flag", cfg.CredentialRef)
 		}
+		if src := cfg.CredentialRefSource(); src != config.RefSourceFlag {
+			t.Errorf("CredentialRefSource = %q, want flag", src)
+		}
 	})
 
 	t.Run("env override: cfg swapped, migration suppressed", func(t *testing.T) {
@@ -113,5 +116,29 @@ func TestApplyCredentialRefOverride(t *testing.T) {
 		if cfg.CredentialRef != "google-readonly/env" {
 			t.Errorf("cfg.CredentialRef = %q, want google-readonly/env", cfg.CredentialRef)
 		}
+		if src := cfg.CredentialRefSource(); src != config.RefSourceEnv {
+			t.Errorf("CredentialRefSource = %q, want env", src)
+		}
 	})
+}
+
+// TestDescribeRefSource pins the human labels used in attributed auth errors
+// and `config show` — including the dynamically derived env-var name.
+func TestDescribeRefSource(t *testing.T) {
+	cases := []struct {
+		src  config.RefSource
+		want string
+	}{
+		{config.RefSourceFlag, "--ref flag"},
+		{config.RefSourceEnv, "GOOGLE_READONLY_CREDENTIAL_REF environment variable"},
+		{config.RefSourceConfig, "config.yml credential_ref"},
+		{config.RefSourceDefault, "built-in default; config.yml sets no credential_ref"},
+		{config.RefSourceExplicit, "explicitly selected ref"},
+		{config.RefSource(""), "unknown source"},
+	}
+	for _, tc := range cases {
+		if got := DescribeRefSource(tc.src); got != tc.want {
+			t.Errorf("DescribeRefSource(%q) = %q, want %q", tc.src, got, tc.want)
+		}
+	}
 }

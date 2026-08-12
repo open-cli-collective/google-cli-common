@@ -99,50 +99,6 @@ func TestExtractAuthCode(t *testing.T) {
 	}
 }
 
-func TestIsAuthError(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		err      error
-		expected bool
-	}{
-		{"nil error", nil, false},
-		{"generic error", errors.New("something went wrong"), false},
-		{"network error", errors.New("connection refused"), false},
-		{"googleapi 401", &googleapi.Error{Code: http.StatusUnauthorized, Message: "Invalid Credentials"}, true},
-		{"googleapi 403", &googleapi.Error{Code: http.StatusForbidden, Message: "Access denied"}, false},
-		{"googleapi 404", &googleapi.Error{Code: http.StatusNotFound, Message: "Not found"}, false},
-		{"text 401 + Invalid Credentials", errors.New("googleapi: Error 401: Invalid Credentials"), true},
-		{"text 401 + invalid_grant", errors.New("oauth2: 401 invalid_grant: Token has been expired"), true},
-		{"text Token has been expired or revoked", errors.New("401: Token has been expired or revoked"), true},
-		{"text 401 alone", errors.New("HTTP 401 response"), false},
-		// An expired/revoked refresh token fails token *refresh* (HTTP 400
-		// invalid_grant from the token endpoint), so it carries no 401 —
-		// this is the shape a Testing-mode OAuth app produces every 7 days.
-		{"RetrieveError invalid_grant", &oauth2.RetrieveError{
-			Response:         &http.Response{StatusCode: http.StatusBadRequest},
-			ErrorCode:        "invalid_grant",
-			ErrorDescription: "Token has been expired or revoked.",
-		}, true},
-		{"RetrieveError invalid_grant wrapped like production", fmt.Errorf("getting profile: %w",
-			&url.Error{Op: "Get", URL: "https://gmail.googleapis.com/gmail/v1/users/me/profile", Err: &oauth2.RetrieveError{
-				Response:  &http.Response{StatusCode: http.StatusBadRequest},
-				ErrorCode: "invalid_grant",
-			}}), true},
-		{"RetrieveError other code", &oauth2.RetrieveError{
-			Response:  &http.Response{StatusCode: http.StatusServiceUnavailable},
-			ErrorCode: "temporarily_unavailable",
-		}, false},
-		{"text invalid_grant without 401", errors.New(`oauth2: "invalid_grant" "Token has been expired or revoked."`), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			testutil.Equal(t, isAuthError(tt.err), tt.expected)
-		})
-	}
-}
-
 func TestValidateOAuthJSONRejectsGarbage(t *testing.T) {
 	t.Parallel()
 	if err := validateOAuthJSON("not json"); err == nil {

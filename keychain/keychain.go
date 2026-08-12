@@ -43,10 +43,11 @@ var ErrTokenNotFound = errors.New("no token found in secure storage")
 // can report it in `config show` / errors without re-deriving it (the ref is
 // not secret — §1.12).
 type Store struct {
-	cs      *credstore.Store
-	service string
-	profile string
-	ref     string
+	cs        *credstore.Store
+	service   string
+	profile   string
+	ref       string
+	refSource config.RefSource
 }
 
 // Open resolves the authoritative credential_ref from config.yml (§1.3 — the
@@ -90,8 +91,9 @@ func open(overwrite, runMigration bool) (*Store, error) {
 // safety-critical swap+suppression is directly testable without
 // config.LoadConfigForRuntime or a real keyring.
 func applyCredentialRefOverride(cfg *config.Config, runMigration bool) bool {
-	if ref, overridden := effectiveRef(cfg.CredentialRef); overridden {
+	if ref, source, overridden := effectiveRef(cfg.CredentialRef); overridden {
 		cfg.CredentialRef = ref
+		cfg.SetCredentialRefSource(source)
 		return false
 	}
 	return runMigration
@@ -113,17 +115,18 @@ func CredentialRefEnvVar() string {
 
 // effectiveRef applies the per-invocation credential-ref precedence
 // (--ref flag > <SERVICE>_CREDENTIAL_REF env > config credential_ref) and
-// reports whether an explicit override was supplied. Mirrors the --backend
-// precedence chain. When overridden is true, the caller must skip the one-time
-// §1.8 migration (see open / OpenRef).
-func effectiveRef(configRef string) (ref string, overridden bool) {
+// reports whether an explicit override was supplied, plus which source won
+// (for error attribution). Mirrors the --backend precedence chain. When
+// overridden is true, the caller must skip the one-time §1.8 migration (see
+// open / OpenRef).
+func effectiveRef(configRef string) (ref string, source config.RefSource, overridden bool) {
 	if v, set := GetCredentialRefOverride(); set && v != "" {
-		return v, true
+		return v, config.RefSourceFlag, true
 	}
 	if v := os.Getenv(CredentialRefEnvVar()); v != "" {
-		return v, true
+		return v, config.RefSourceEnv, true
 	}
-	return configRef, false
+	return configRef, "", false
 }
 
 // OpenRef opens a store against an explicit ref instead of config.yml's
@@ -140,6 +143,7 @@ func OpenRef(ref string) (*Store, error) {
 	}
 	if ref != "" {
 		cfg.CredentialRef = ref
+		cfg.SetCredentialRefSource(config.RefSourceExplicit)
 	}
 	return openWith(cfg, false, false)
 }
@@ -178,7 +182,7 @@ func openWith(cfg *config.Config, overwrite, runMigration bool) (*Store, error) 
 		return nil, err
 	}
 
-	s := &Store{cs: cs, service: service, profile: profile, ref: cfg.CredentialRef}
+	s := &Store{cs: cs, service: service, profile: profile, ref: cfg.CredentialRef, refSource: cfg.CredentialRefSource()}
 
 	if runMigration {
 		if err := migrateLegacyOverwrite(s, cfg, overwrite); err != nil {
@@ -199,6 +203,31 @@ func (s *Store) Close() error {
 
 // Ref returns the resolved credential ref (non-secret; safe to display).
 func (s *Store) Ref() string { return s.ref }
+
+// RefSource returns where the resolved ref came from (flag/env/config/
+// default/explicit). Empty when the Store was opened from an injected test
+// config that never went through load-time provenance stamping.
+func (s *Store) RefSource() config.RefSource { return s.refSource }
+
+// DescribeRefSource renders a RefSource as the human label used in error
+// messages and `config show` — e.g. "config.yml credential_ref" or the
+// resolved <SERVICE>_CREDENTIAL_REF env-var name. It lives here (not in
+// config) because the env-var name derives from the credstore service.
+func DescribeRefSource(s config.RefSource) string {
+	switch s {
+	case config.RefSourceFlag:
+		return "--ref flag"
+	case config.RefSourceEnv:
+		return CredentialRefEnvVar() + " environment variable"
+	case config.RefSourceConfig:
+		return "config.yml credential_ref"
+	case config.RefSourceDefault:
+		return "built-in default; config.yml sets no credential_ref"
+	case config.RefSourceExplicit:
+		return "explicitly selected ref"
+	}
+	return "unknown source"
+}
 
 // Service returns the resolved service segment (non-secret; used for the
 // §1.4 passphrase-source label).
