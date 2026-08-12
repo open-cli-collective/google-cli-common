@@ -17,6 +17,7 @@ import (
 	"google.golang.org/api/googleapi"
 
 	"github.com/open-cli-collective/google-cli-common/config"
+	"github.com/open-cli-collective/google-cli-common/keychain"
 	"github.com/open-cli-collective/google-cli-common/people"
 	"github.com/open-cli-collective/google-cli-common/testutil"
 	"github.com/open-cli-collective/google-cli-common/view"
@@ -125,7 +126,8 @@ type stubPrompter struct {
 	pasteJSONErr error
 	filePathErr  error
 
-	calls []string
+	calls        []string
+	reauthTarget string
 }
 
 func (s *stubPrompter) SelectAudience() (string, error) {
@@ -156,8 +158,9 @@ func (s *stubPrompter) PasteRedirectURL() (string, error) {
 	s.calls = append(s.calls, "redirect")
 	return s.redirectURL, nil
 }
-func (s *stubPrompter) ConfirmReauth() (bool, error) {
+func (s *stubPrompter) ConfirmReauth(target string) (bool, error) {
 	s.calls = append(s.calls, "reauth")
+	s.reauthTarget = target
 	return s.reauth, nil
 }
 
@@ -1035,5 +1038,200 @@ func TestRunWith_EnsureMigratedRunsFirst(t *testing.T) {
 	}
 	if len(order) != 1 || order[0] != "migrate" {
 		t.Fatalf("EnsureMigrated must run first and SetToken must not run on conflict; order=%v", order)
+	}
+}
+
+// ---- target announcement, --profile, identity recording -------------------
+
+func TestApplyProfileFlag(t *testing.T) {
+	// Not Parallel: mutates the package-global credential-ref override.
+	t.Cleanup(func() { keychain.SetCredentialRefOverride("", false) })
+
+	t.Run("valid name routes the run at service/name", func(t *testing.T) {
+		keychain.SetCredentialRefOverride("", false)
+		ref, err := applyProfileFlag("work")
+		if err != nil {
+			t.Fatalf("applyProfileFlag: %v", err)
+		}
+		if ref != "google-readonly/work" {
+			t.Errorf("ref = %q, want google-readonly/work", ref)
+		}
+		if v, set := keychain.GetCredentialRefOverride(); !set || v != "google-readonly/work" {
+			t.Errorf("override = (%q,%v), want (google-readonly/work,true)", v, set)
+		}
+	})
+
+	t.Run("invalid characters rejected", func(t *testing.T) {
+		keychain.SetCredentialRefOverride("", false)
+		if _, err := applyProfileFlag("user@example.com"); err == nil {
+			t.Fatal("expected error for '@' in profile name")
+		}
+	})
+
+	t.Run("conflict with --ref rejected", func(t *testing.T) {
+		keychain.SetCredentialRefOverride("google-readonly/other", true)
+		if _, err := applyProfileFlag("work"); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("expected mutual-exclusion error, got %v", err)
+		}
+	})
+}
+
+// TestRunWithAnnouncesTarget pins the up-front naming: which profile this
+// run touches, where it was selected, and which account it currently holds —
+// BEFORE any prompt or write.
+func TestRunWithAnnouncesTarget(t *testing.T) {
+	t.Parallel()
+	fs := newFakeFS()
+	d := baseDeps(t, fs)
+	out := &bytes.Buffer{}
+	d.View = view.NewWithWriters(out, out)
+	d.DescribeTarget = func() (string, string, string) {
+		return "google-readonly/default", "config.yml credential_ref", "ada@example.com"
+	}
+
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "downloaded.json")
+	if err := os.WriteFile(src, []byte(validOAuthJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stub := &stubPrompter{redirectURL: "http://localhost/?code=ABC"}
+	d.Prompter = stub
+
+	if err := runWith(context.Background(), d, &initOptions{credentialsFile: src, noBrowser: true}); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Setting up profile: google-readonly/default (via config.yml credential_ref)",
+		"Currently holds:    ada@example.com",
+		"init --profile <name>",
+		"Token for google-readonly/default saved to test",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestReauthPromptNamesTarget is the consent fix: overwriting a token must
+// name the profile AND account being overwritten in the confirmation.
+func TestReauthPromptNamesTarget(t *testing.T) {
+	t.Parallel()
+	fs := newFakeFS()
+	d := baseDeps(t, fs)
+	d.DescribeTarget = func() (string, string, string) {
+		return "google-readonly/default", "config.yml credential_ref", "ada@example.com"
+	}
+	d.HasStoredToken = func() bool { return true }
+	calls := 0
+	d.GmailVerify = func(_ context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", &googleapi.Error{Code: http.StatusUnauthorized, Message: "Invalid Credentials"}
+		}
+		return "ada@example.com", nil
+	}
+
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "downloaded.json")
+	if err := os.WriteFile(src, []byte(validOAuthJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stub := &stubPrompter{redirectURL: "http://localhost/?code=ABC", reauth: true}
+	d.Prompter = stub
+
+	if err := runWith(context.Background(), d, &initOptions{credentialsFile: src, noBrowser: true}); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	want := "google-readonly/default (ada@example.com)"
+	if stub.reauthTarget != want {
+		t.Errorf("ConfirmReauth target = %q, want %q", stub.reauthTarget, want)
+	}
+}
+
+// TestRunWithRecordsIdentity proves both verify paths feed the identity
+// cache: the fresh OAuth flow and the existing-token fast path.
+func TestRunWithRecordsIdentity(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fresh flow", func(t *testing.T) {
+		t.Parallel()
+		fs := newFakeFS()
+		d := baseDeps(t, fs)
+		var recorded []string
+		d.RecordIdentity = func(email string) { recorded = append(recorded, email) }
+
+		srcDir := t.TempDir()
+		src := filepath.Join(srcDir, "downloaded.json")
+		if err := os.WriteFile(src, []byte(validOAuthJSON), 0644); err != nil {
+			t.Fatal(err)
+		}
+		d.Prompter = &stubPrompter{redirectURL: "http://localhost/?code=ABC"}
+
+		if err := runWith(context.Background(), d, &initOptions{credentialsFile: src, noBrowser: true}); err != nil {
+			t.Fatalf("runWith: %v", err)
+		}
+		if len(recorded) != 1 || recorded[0] != "ada@example.com" {
+			t.Errorf("recorded = %v, want [ada@example.com]", recorded)
+		}
+	})
+
+	t.Run("existing token", func(t *testing.T) {
+		t.Parallel()
+		fs := newFakeFS()
+		d := baseDeps(t, fs)
+		d.HasStoredToken = func() bool { return true }
+		var recorded []string
+		d.RecordIdentity = func(email string) { recorded = append(recorded, email) }
+
+		srcDir := t.TempDir()
+		src := filepath.Join(srcDir, "downloaded.json")
+		if err := os.WriteFile(src, []byte(validOAuthJSON), 0644); err != nil {
+			t.Fatal(err)
+		}
+		d.Prompter = &stubPrompter{}
+
+		if err := runWith(context.Background(), d, &initOptions{credentialsFile: src}); err != nil {
+			t.Fatalf("runWith: %v", err)
+		}
+		if len(recorded) != 1 || recorded[0] != "ada@example.com" {
+			t.Errorf("recorded = %v, want [ada@example.com]", recorded)
+		}
+	})
+}
+
+// TestRunWithProfileFlagGuidance: a --profile run ends by telling the user
+// the new profile is NOT active and how to reach it — the whole point of
+// --profile is adding an account without hijacking the default.
+func TestRunWithProfileFlagGuidance(t *testing.T) {
+	t.Parallel()
+	fs := newFakeFS()
+	d := baseDeps(t, fs)
+	out := &bytes.Buffer{}
+	d.View = view.NewWithWriters(out, out)
+	d.DescribeTarget = func() (string, string, string) {
+		return "google-readonly/work", "--ref flag", ""
+	}
+
+	srcDir := t.TempDir()
+	src := filepath.Join(srcDir, "downloaded.json")
+	if err := os.WriteFile(src, []byte(validOAuthJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d.Prompter = &stubPrompter{redirectURL: "http://localhost/?code=ABC"}
+
+	if err := runWith(context.Background(), d, &initOptions{credentialsFile: src, noBrowser: true, profile: "work"}); err != nil {
+		t.Fatalf("runWith: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"Setting up profile: google-readonly/work (via --profile flag)",
+		"authenticated but not active",
+		"profiles use work",
+		"--ref google-readonly/work",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q:\n%s", want, got)
+		}
 	}
 }

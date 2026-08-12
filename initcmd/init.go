@@ -19,9 +19,12 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	"github.com/open-cli-collective/cli-common/credstore"
+
 	"github.com/open-cli-collective/google-cli-common/auth"
 	"github.com/open-cli-collective/google-cli-common/config"
 	"github.com/open-cli-collective/google-cli-common/gmail"
+	"github.com/open-cli-collective/google-cli-common/identitycache"
 	"github.com/open-cli-collective/google-cli-common/keychain"
 	"github.com/open-cli-collective/google-cli-common/people"
 	"github.com/open-cli-collective/google-cli-common/view"
@@ -33,6 +36,7 @@ type initOptions struct {
 	noBrowser       bool
 	noVerify        bool
 	authCodeStdin   bool
+	profile         string
 }
 
 // NewCommand returns the init command.
@@ -68,6 +72,11 @@ You can also copy your credentials.json to the clipboard and run init — it wil
 read, validate, and write it to the config directory for you.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if opts.profile != "" {
+				if _, err := applyProfileFlag(opts.profile); err != nil {
+					return err
+				}
+			}
 			return runWith(cmd.Context(), defaultDeps(), opts)
 		},
 	}
@@ -76,8 +85,29 @@ read, validate, and write it to the config directory for you.`,
 	cmd.Flags().BoolVar(&opts.noBrowser, "no-browser", false, "Don't try to open the consent URL in a browser")
 	cmd.Flags().BoolVar(&opts.noVerify, "no-verify", false, "Skip connectivity verification after setup")
 	cmd.Flags().BoolVar(&opts.authCodeStdin, "auth-code-stdin", false, "Read the OAuth authorization code/redirect URL from stdin (two-phase install; implies no browser-open)")
+	cmd.Flags().StringVar(&opts.profile, "profile", "", "Authenticate the named profile (stored as <service>/<name>) instead of the active one - the way to ADD an account without touching the active profile's token")
 
 	return cmd
+}
+
+// applyProfileFlag routes this init run at <service>/<name> via the same
+// per-invocation override mechanism as the global --ref flag (flag-level
+// precedence; the one-time migration is suppressed automatically, exactly as
+// for --ref). Returns the resolved ref.
+func applyProfileFlag(profile string) (string, error) {
+	if v, set := keychain.GetCredentialRefOverride(); set && v != "" {
+		return "", fmt.Errorf("--profile and --ref are mutually exclusive (--ref %s was given)", v)
+	}
+	service, _, err := credstore.ParseRef(config.DefaultCredentialRef)
+	if err != nil {
+		return "", err
+	}
+	ref, err := credstore.FormatRef(service, profile)
+	if err != nil {
+		return "", fmt.Errorf("invalid profile name %q (allowed characters: letters, digits, '-', '_'): %w", profile, err)
+	}
+	keychain.SetCredentialRefOverride(ref, true)
+	return ref, nil
 }
 
 // initDeps groups every external collaborator the wizard touches. Tests
@@ -117,6 +147,18 @@ type initDeps struct {
 	// legacy-vs-keyring conflict aborts init loudly).
 	EnsureMigrated func() error
 
+	// DescribeTarget names the credential ref this run will (re)authenticate,
+	// how it was selected (human label), and the cached account email it
+	// currently holds ("" when unknown). Backs the up-front announcement —
+	// init touching "whatever the ref points at" without saying so is how an
+	// intended add-an-account run silently overwrites the active profile's
+	// token. Injected so tests can pin the announcement without a keyring.
+	DescribeTarget func() (ref, sourceLabel, cachedEmail string)
+
+	// RecordIdentity caches the verified account email for the active
+	// profile (best-effort; feeds `profiles list`). Injected for tests.
+	RecordIdentity func(email string)
+
 	// Token storage (credstore-backed; the keyring is the only store).
 	HasStoredToken    func() bool
 	SetToken          func(t *oauth2.Token) error
@@ -152,7 +194,10 @@ type prompter interface {
 	FilePath() (string, error)
 	ConfirmOpenBrowser() (bool, error)
 	PasteRedirectURL() (string, error)
-	ConfirmReauth() (bool, error)
+	// ConfirmReauth asks whether to clear and re-authenticate the named
+	// target (a ref, plus the cached account email when known) — naming it
+	// in the prompt is the consent step for overwriting a token.
+	ConfirmReauth(target string) (bool, error)
 }
 
 // defaultDeps wires up production collaborators.
@@ -179,6 +224,8 @@ func defaultDeps() initDeps {
 		DetectConfigRelocation: config.DetectConfigRelocation,
 		ApplyConfigRelocation:  config.ApplyConfigRelocation,
 		EnsureMigrated:         ensureMigrated,
+		DescribeTarget:         describeTarget,
+		RecordIdentity:         recordIdentity,
 		HasStoredToken:         storeHasToken,
 		SetToken:               storeSetToken,
 		DeleteToken:            storeDeleteToken,
@@ -209,6 +256,47 @@ func defaultDeps() initDeps {
 		GetConfigPath: config.GetConfigPath,
 		Prompter:      huhPrompter{},
 	}
+}
+
+// describeTarget resolves the ref this run will authenticate (per-invocation
+// overrides included, since OpenNoMigrate applies them), its source label,
+// and the cached account email. Best-effort: if the keyring can't open, fall
+// back to the loaded config's intent so the announcement still names a ref.
+func describeTarget() (ref, sourceLabel, cachedEmail string) {
+	st, err := keychain.OpenNoMigrate()
+	if err != nil {
+		cfg, cerr := config.LoadConfigForRuntime()
+		if cerr != nil {
+			return "", "", ""
+		}
+		return cfg.CredentialRef, keychain.DescribeRefSource(cfg.CredentialRefSource()), ""
+	}
+	defer func() { _ = st.Close() }()
+	ref = st.Ref()
+	sourceLabel = keychain.DescribeRefSource(st.RefSource())
+	if _, profile, perr := credstore.ParseRef(ref); perr == nil {
+		if e, ok := identitycache.Load()[profile]; ok {
+			cachedEmail = e.Email
+		}
+	}
+	return ref, sourceLabel, cachedEmail
+}
+
+// recordIdentity caches the verified email under the active profile so
+// `profiles list` can show which account each profile holds. Best-effort by
+// design: identity caching must never fail an init that authenticated fine.
+func recordIdentity(email string) {
+	st, err := keychain.OpenNoMigrate()
+	if err != nil {
+		return
+	}
+	ref := st.Ref()
+	_ = st.Close()
+	_, profile, err := credstore.ParseRef(ref)
+	if err != nil {
+		return
+	}
+	_ = identitycache.Put(profile, email)
 }
 
 // ensureMigrated runs (and resolves) the one-time §1.8 migration up front via
@@ -318,6 +406,39 @@ func runWith(ctx context.Context, d initDeps, opts *initOptions) error {
 		}
 	}
 
+	// Step 0.5: name the target BEFORE any prompt, consent, or token write.
+	// init (re)authenticating "whatever the ref points at" without saying
+	// which profile/account is how an intended add-an-account run silently
+	// overwrites the active profile's token.
+	var targetRef, target string
+	if d.DescribeTarget != nil {
+		ref, sourceLabel, cachedEmail := d.DescribeTarget()
+		if opts.profile != "" {
+			sourceLabel = "--profile flag"
+		}
+		targetRef = ref
+		target = ref
+		if ref != "" {
+			d.View.Println("")
+			if sourceLabel != "" {
+				d.View.Printf("Setting up profile: %s (via %s)\n", ref, sourceLabel)
+			} else {
+				d.View.Printf("Setting up profile: %s\n", ref)
+			}
+			if cachedEmail != "" {
+				d.View.Printf("Currently holds:    %s\n", cachedEmail)
+				target = fmt.Sprintf("%s (%s)", ref, cachedEmail)
+			}
+			if opts.profile == "" {
+				d.View.Printf("To add a different account instead, use '%s init --profile <name>'.\n", config.ProductName())
+			}
+			d.View.Println("")
+		}
+	}
+	if target == "" {
+		target = "the active profile"
+	}
+
 	credPath, err := d.GetCredentialsPath()
 	if err != nil {
 		return fmt.Errorf("getting credentials path: %w", err)
@@ -329,12 +450,12 @@ func runWith(ctx context.Context, d initDeps, opts *initOptions) error {
 	}
 
 	// Step 3: token resolution.
-	handled, err := tryExistingToken(ctx, d, opts)
+	handled, err := tryExistingToken(ctx, d, opts, target)
 	if err != nil {
 		return err
 	}
 	if handled {
-		return nil
+		return finishRun(d, opts, targetRef)
 	}
 
 	// Step 4: OAuth flow.
@@ -384,7 +505,11 @@ func runWith(ctx context.Context, d initDeps, opts *initOptions) error {
 	if err := d.SetToken(token); err != nil {
 		return fmt.Errorf("saving token: %w", err)
 	}
-	d.View.Success("Token saved to %s", d.GetStorageBackend())
+	if targetRef != "" {
+		d.View.Success("Token for %s saved to %s", targetRef, d.GetStorageBackend())
+	} else {
+		d.View.Success("Token saved to %s", d.GetStorageBackend())
+	}
 
 	// Step 5: persist granted scopes (creates config.json if missing).
 	cfg, cfgErr := d.LoadConfig()
@@ -407,6 +532,9 @@ func runWith(ctx context.Context, d initDeps, opts *initOptions) error {
 			return fmt.Errorf("verifying Gmail API: %w", err)
 		}
 		d.View.Success("Verified Gmail API for %s", email)
+		if d.RecordIdentity != nil {
+			d.RecordIdentity(email)
+		}
 
 		if hasScope(config.Scopes(), profileScope) {
 			profile, err := d.PeopleGetMe(ctx)
@@ -426,6 +554,22 @@ func runWith(ctx context.Context, d initDeps, opts *initOptions) error {
 		d.View.Printf("  %s me\n", prod)
 	}
 	d.View.Printf("  %s mail search \"is:unread\"\n", prod)
+	return finishRun(d, opts, targetRef)
+}
+
+// finishRun appends the not-the-active-profile guidance after a successful
+// --profile run: the new account is authenticated but deliberately NOT made
+// active — adding an account must not hijack the default — so the user needs
+// to be told how to reach it.
+func finishRun(d initDeps, opts *initOptions, targetRef string) error {
+	if opts.profile == "" || targetRef == "" {
+		return nil
+	}
+	prod := config.ProductName()
+	d.View.Println("")
+	d.View.Printf("Profile %s is authenticated but not active.\n", targetRef)
+	d.View.Printf("Make it active:      %s profiles use %s\n", prod, opts.profile)
+	d.View.Printf("Use per invocation:  %s --ref %s <command>\n", prod, targetRef)
 	return nil
 }
 
@@ -495,7 +639,7 @@ func apisForScopes(scopes []string) []string {
 // but People-insufficient token (typical of users who upgraded gro) must
 // trigger re-auth here, otherwise `gro me`'s "run gro init" message
 // produces an infinite remediation loop.
-func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool, error) {
+func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions, target string) (bool, error) {
 	if !d.HasStoredToken() {
 		return false, nil
 	}
@@ -507,7 +651,7 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 		if msg := auth.CheckScopesMigration(cfg.GrantedScopes); msg != "" {
 			d.View.Error("Recorded scopes are stale.")
 			d.View.Println(msg)
-			if err := promptAndDeleteForReauth(d, opts); err != nil {
+			if err := promptAndDeleteForReauth(d, opts, target); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -524,8 +668,8 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 	email, err := d.GmailVerify(ctx)
 	if err != nil {
 		if auth.IsAuthError(err) {
-			d.View.Error("Stored token is expired or revoked.")
-			if err := promptAndDeleteForReauth(d, opts); err != nil {
+			d.View.Error("Stored token for %s is expired or revoked.", target)
+			if err := promptAndDeleteForReauth(d, opts, target); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -533,6 +677,9 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 		return false, err
 	}
 	d.View.Success("Already authenticated as %s", email)
+	if d.RecordIdentity != nil {
+		d.RecordIdentity(email)
+	}
 
 	// People verify catches scope-stale tokens that Gmail accepts, and supplies
 	// the profile for the success-line render without a second API call. Only
@@ -545,7 +692,7 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 	if err != nil {
 		if people.IsInsufficientScopeError(err) {
 			d.View.Error("Token is missing People API scope.")
-			if err := promptAndDeleteForReauth(d, opts); err != nil {
+			if err := promptAndDeleteForReauth(d, opts, target); err != nil {
 				return false, err
 			}
 			return false, nil
@@ -564,11 +711,11 @@ func tryExistingToken(ctx context.Context, d initDeps, opts *initOptions) (bool,
 // and stdin is reserved for the auth code, so the confirmation is skipped:
 // the caller only reaches here when the stored token is already unusable,
 // and a scripted install asking for a fresh token is its own consent.
-func promptAndDeleteForReauth(d initDeps, opts *initOptions) error {
+func promptAndDeleteForReauth(d initDeps, opts *initOptions, target string) error {
 	if opts.authCodeStdin {
-		d.View.Info("Re-authenticating (--auth-code-stdin; skipping confirmation).")
+		d.View.Info("Re-authenticating %s (--auth-code-stdin; skipping confirmation).", target)
 	} else {
-		confirm, err := d.Prompter.ConfirmReauth()
+		confirm, err := d.Prompter.ConfirmReauth(target)
 		if err != nil {
 			return err
 		}
@@ -861,11 +1008,11 @@ func (huhPrompter) PasteRedirectURL() (string, error) {
 	return s, err
 }
 
-func (huhPrompter) ConfirmReauth() (bool, error) {
+func (huhPrompter) ConfirmReauth(target string) (bool, error) {
 	var ok bool
 	err := huh.NewConfirm().
-		Title("Re-authenticate now?").
-		Description("This will clear the existing token and start a fresh OAuth flow.").
+		Title(fmt.Sprintf("Re-authenticate %s?", target)).
+		Description("This clears the stored token for this profile and starts a fresh OAuth flow. Other profiles are untouched.").
 		Affirmative("Re-auth").
 		Negative("Cancel").
 		Value(&ok).
