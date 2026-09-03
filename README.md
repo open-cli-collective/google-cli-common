@@ -1,3 +1,5 @@
+> **Archived.** This library was folded into the internal packages of [open-cli-collective/google-cli](https://github.com/open-cli-collective/google-cli), which builds both `gro` and `grw` from one module. Nothing depends on this module any more.
+
 # google-cli-common
 
 Shared Go library for the Open CLI Collective's Google CLIs. It holds everything
