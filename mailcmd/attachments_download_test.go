@@ -59,6 +59,44 @@ func TestDownloadAttachmentsCommand_DuplicateFilenames(t *testing.T) {
 	}
 }
 
+func TestDownloadAttachmentsCommand_DuplicateSuffixDoesNotOverwriteOriginal(t *testing.T) {
+	outputDir := t.TempDir()
+	contents := map[string][]byte{
+		"first":     []byte("first image"),
+		"duplicate": []byte("duplicate image"),
+		"original":  []byte("original image-2"),
+	}
+	mock := &MockGmailClient{
+		GetAttachmentsFunc: func(_ context.Context, _ string) ([]*gmailapi.Attachment, error) {
+			return []*gmailapi.Attachment{
+				{Filename: "image.png", AttachmentID: "first"},
+				{Filename: "image.png", AttachmentID: "duplicate"},
+				{Filename: "image-2.png", AttachmentID: "original"},
+			}, nil
+		},
+		DownloadAttachmentFunc: func(_ context.Context, _, attachmentID string) ([]byte, error) {
+			return contents[attachmentID], nil
+		},
+	}
+
+	cmd := newDownloadAttachmentsCommand()
+	cmd.SetArgs([]string{"message-id", "--all", "--output", outputDir})
+	withMockClient(mock, func() {
+		testutil.NoError(t, cmd.Execute())
+	})
+
+	want := map[string]string{
+		"image.png":   "first image",
+		"image-2.png": "original image-2",
+		"image-3.png": "duplicate image",
+	}
+	for name, content := range want {
+		got, err := os.ReadFile(filepath.Join(outputDir, name))
+		testutil.NoError(t, err)
+		testutil.Equal(t, string(got), content)
+	}
+}
+
 func TestDownloadAttachmentsCommand_DuplicateZipExtraction(t *testing.T) {
 	zipBytes := func(name, content string) []byte {
 		var buf bytes.Buffer

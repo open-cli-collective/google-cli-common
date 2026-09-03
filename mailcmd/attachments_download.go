@@ -85,15 +85,31 @@ Examples:
 
 			// Download each attachment. Gmail commonly gives pasted inline images
 			// the same filename, so preserve all of them with stable suffixes.
-			nameCounts := make(map[string]int)
+			reservedNames := make(map[string]bool, len(toDownload))
 			for _, att := range toDownload {
-				nameCounts[att.Filename]++
+				reservedNames[att.Filename] = true
+			}
+			usedNames := make(map[string]bool, len(toDownload))
+			nextSuffix := make(map[string]int)
+			for _, att := range toDownload {
 				downloadName := att.Filename
-				if nameCounts[att.Filename] > 1 {
+				if usedNames[downloadName] {
 					ext := filepath.Ext(att.Filename)
-					downloadName = fmt.Sprintf("%s-%d%s",
-						strings.TrimSuffix(att.Filename, ext), nameCounts[att.Filename], ext)
+					base := strings.TrimSuffix(att.Filename, ext)
+					suffix := nextSuffix[att.Filename]
+					if suffix < 2 {
+						suffix = 2
+					}
+					for {
+						downloadName = fmt.Sprintf("%s-%d%s", base, suffix, ext)
+						suffix++
+						if !usedNames[downloadName] && !reservedNames[downloadName] {
+							break
+						}
+					}
+					nextSuffix[att.Filename] = suffix
 				}
+				usedNames[downloadName] = true
 
 				// Sanitize filename for display to prevent terminal injection
 				safeFilename := SanitizeFilename(downloadName)
